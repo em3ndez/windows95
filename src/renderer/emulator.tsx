@@ -17,6 +17,7 @@ export interface EmulatorState {
   emulator?: any;
   scale: number;
   floppyFile?: File;
+  cdromFile?: File;
   isBootingFresh: boolean;
   isCursorCaptured: boolean;
   isInfoDisplayed: boolean;
@@ -42,7 +43,9 @@ export class Emulator extends React.Component<{}, EmulatorState> {
       isRunning: false,
       currentUiCard: "start",
       isInfoDisplayed: true,
-      scale: 1,
+      // We can start pretty large
+      // If it's too large, it'll just grow until it hits borders
+      scale: 2,
     };
 
     this.setupInputListeners();
@@ -179,7 +182,7 @@ export class Emulator extends React.Component<{}, EmulatorState> {
    * 🤡
    */
   public renderUI() {
-    const { isRunning, currentUiCard, floppyFile } = this.state;
+    const { isRunning, currentUiCard, floppyFile, cdromFile } = this.state;
 
     if (isRunning) {
       return null;
@@ -191,8 +194,10 @@ export class Emulator extends React.Component<{}, EmulatorState> {
       card = (
         <CardSettings
           setFloppy={(floppyFile) => this.setState({ floppyFile })}
+          setCdrom={(cdromFile) => this.setState({ cdromFile })}
           bootFromScratch={this.bootFromScratch}
           floppy={floppyFile}
+          cdrom={cdromFile}
         />
       );
     } else if (currentUiCard === "drive") {
@@ -261,7 +266,6 @@ export class Emulator extends React.Component<{}, EmulatorState> {
     const imagePath = path.join(__dirname, "../../images/windows95.img");
 
     console.log(`Showing disk image in ${imagePath}`);
-    ``;
 
     shell.showItemInFolder(imagePath);
   }
@@ -272,26 +276,37 @@ export class Emulator extends React.Component<{}, EmulatorState> {
   private async startEmulator() {
     document.body.classList.remove("paused");
 
-    const imageSize = await getDiskImageSize();
+    const cdrom: any = {};
+    const cdromFile: any = this.state.cdromFile;
+    if (cdromFile?.path) {
+      cdrom.url = cdromFile.path;
+      cdrom.async = true;
+      cdrom.size = await getDiskImageSize(cdromFile.path);
+    }
+
     const options = {
+      wasm_path: path.join(__dirname, "build/v86.wasm"),
       memory_size: 128 * 1024 * 1024,
-      video_memory_size: 32 * 1024 * 1024,
+      vga_memory_size: 32 * 1024 * 1024,
       screen_container: document.getElementById("emulator"),
       bios: {
-        url: "../../bios/seabios.bin",
+        url: path.join(__dirname, "../../bios/seabios.bin"),
       },
       vga_bios: {
-        url: "../../bios/vgabios.bin",
+        url: path.join(__dirname, "../../bios/vgabios.bin"),
       },
       hda: {
-        url: "../../images/windows95.img",
+        url: CONSTANTS.IMAGE_PATH,
         async: true,
-        size: imageSize,
+        size: await getDiskImageSize(CONSTANTS.IMAGE_PATH),
       },
       fda: {
         buffer: this.state.floppyFile,
       },
+      cdrom: cdrom,
       boot_order: 0x132,
+      // One day, maybe!
+      // network_relay_url: "ws://localhost:8080/"
     };
 
     console.log(`🚜 Starting emulator with options`, options);
@@ -316,6 +331,7 @@ export class Emulator extends React.Component<{}, EmulatorState> {
 
       this.lockMouse();
       this.state.emulator.run();
+      this.state.emulator.screen_set_scale(this.state.scale);
     }, 500);
   }
 
@@ -345,7 +361,7 @@ export class Emulator extends React.Component<{}, EmulatorState> {
 
     await this.saveState();
     this.unlockMouse();
-    emulator.stop();
+    await emulator.stop();
     this.setState({ isRunning: false });
 
     document.body.classList.add("paused");
@@ -369,25 +385,17 @@ export class Emulator extends React.Component<{}, EmulatorState> {
     const { emulator } = this.state;
     const statePath = await getStatePath();
 
-    return new Promise((resolve) => {
-      if (!emulator || !emulator.save_state) {
-        console.log(`restoreState: No emulator present`);
-        return resolve();
-      }
+    if (!emulator || !emulator.save_state) {
+      console.log(`restoreState: No emulator present`);
+      return;
+    }
 
-      emulator.save_state(async (error: Error, newState: ArrayBuffer) => {
-        if (error) {
-          console.warn(`saveState: Could not save state`, error);
-          return resolve();
-        }
-
-        await fs.outputFile(statePath, Buffer.from(newState));
-
-        console.log(`saveState: Saved state to ${statePath}`);
-
-        resolve();
-      });
-    });
+    try {
+      const newState = await emulator.save_state();
+      await fs.outputFile(statePath, Buffer.from(newState));
+    } catch (error) {
+      console.warn(`saveState: Could not save state`, error);
+    }
   }
 
   /**
@@ -407,7 +415,7 @@ export class Emulator extends React.Component<{}, EmulatorState> {
     }
 
     try {
-      this.state.emulator.restore_state(state);
+      await this.state.emulator.restore_state(state);
     } catch (error) {
       console.log(
         `State: Could not read state file. Maybe none exists?`,
